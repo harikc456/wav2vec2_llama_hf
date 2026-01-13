@@ -53,7 +53,7 @@ Once the model is converted, you can run inference on an audio file. The reposit
 
 ```bash
 python inference.py \
-    --model_path ./hf_model \
+    --model_path harikc456/wav2vec2-llama-300m \
     --audio_file 84-121550-0000.flac
 ```
 The script will load the converted model, process the audio file, and print the transcribed text.
@@ -74,6 +74,24 @@ python push_to_hub.py \
     --repo_name "your-username/your-model-name"
 ```
 This will create a new repository on the Hub under your username and upload the model files.
+
+## Pre-converted Models
+
+The 300m LLM variant of the model is available on the Hugging Face Hub. You can use it directly for inference without needing to convert it yourself.
+
+- **Model:** `harikc456/wav2vec2-llama-300m`
+- **Link:** [https://huggingface.co/harikc456/wav2vec2-llama-300m](https://huggingface.co/harikc456/wav2vec2-llama-300m)
+
+To use this model, you can load it directly with `AutoModelForCTC` and `AutoProcessor` from the `transformers` library:
+
+```python
+from transformers import AutoModelForCTC, AutoProcessor
+
+model_id = "harikc456/wav2vec2-llama-300m"
+
+model = AutoModelForCTC.from_pretrained(model_id)
+processor = AutoProcessor.from_pretrained(model_id)
+```
 
 ## Acknowledgements
 
