@@ -1,0 +1,5 @@
+torch
+transformers
+fairseq
+librosa
+huggingface_hub
