@@ -3,26 +3,112 @@ Wav2Vec2-LLaMA Model for ASR - HuggingFace Port
 Ports the fairseq2 implementation to use HuggingFace Transformers components.
 """
 
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
+from enum import Enum
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (
     Wav2Vec2Model,
+    Wav2Vec2Config,
     LlamaForCausalLM,
+    LlamaConfig,
     PreTrainedModel,
+    PretrainedConfig,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2Encoder
+from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2Encoder, Wav2Vec2PositionalConvEmbedding, Wav2Vec2EncoderLayerStableLayerNorm
 from transformers.modeling_outputs import BaseModelOutput
 
-from config import Wav2Vec2LlamaConfig, Modality, ModalityInput, Wav2Vec2LlamaSpecialTokens
+
+class ModelType(str, Enum):
+    """Model variant types"""
+    LLM_ASR = "llm_asr"
+    LLM_ASR_LID = "llm_asr_lid"  # With Language ID
+    ZERO_SHOT = "zero_shot"  # With in-context learning
+
+
+class Modality(str, Enum):
+    """Input modality types"""
+    AUDIO = "audio"
+    TEXT = "text"
+    LANG = "lang"
+
+
+@dataclass
+class ModalityInput:
+    """Container for multi-modal inputs"""
+    modality: Modality
+    seqs: torch.Tensor
+    seq_lens: List[int]
+    loss: bool = False
+    embedded: bool = False
+
+
+@dataclass
+class Wav2Vec2LlamaSpecialTokens:
+    """Special tokens for different syntaxes"""
+    def __init__(self, vocab_size: int):
+        # Use last tokens in vocab for special markers
+        self.lid_marker = vocab_size - 1
+        self.context_start = vocab_size - 2
+        self.context_end = vocab_size - 3
+        self.context_example_start = vocab_size - 4
+        self.context_example_end = vocab_size - 5
+        self.context_bos = vocab_size - 6
+        self.context_eos = vocab_size - 7
+        self.regular_segment = vocab_size - 8
+        self.last_segment = vocab_size - 9
+
+
+class Wav2Vec2LlamaConfig(PretrainedConfig):
+    """Configuration class for Wav2Vec2-LLaMA model"""
+    
+    model_type = "wav2vec2_llama"
+    
+    def __init__(
+        self,
+        wav2vec2_config: Optional[dict] = None,
+        llama_config: Optional[dict] = None,
+        model_variant: str = "llm_asr",
+        encoder_stacking: int = 1,
+        max_generation_length: int = 8192,
+        lang_embeddings_p: float = 0.0,
+        n_lang_embeddings: Optional[int] = None,
+        n_special_tokens: Optional[int] = 0,
+        n_context_examples: int = 0,
+        pad_token_id: int = 0,
+        bos_token_id: int = 1,
+        eos_token_id: int = 2,
+        **kwargs
+    ):
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            **kwargs
+        )
+        
+        # Initialize sub-configs
+        self.wav2vec2_config = Wav2Vec2Config(**wav2vec2_config) if wav2vec2_config else Wav2Vec2Config()
+        self.llama_config = LlamaConfig(**llama_config) if llama_config else LlamaConfig()
+        
+        # Model-specific parameters
+        self.model_variant = ModelType(model_variant)
+        self.encoder_stacking = encoder_stacking
+        self.max_generation_length = max_generation_length
+        self.lang_embeddings_p = lang_embeddings_p
+        self.n_lang_embeddings = n_lang_embeddings
+        self.n_context_examples = n_context_examples
+        self.n_special_tokens = n_special_tokens
+
 
 class Wav2Vec2EncoderNoLN(Wav2Vec2Encoder):
     def __init__(self, config):
         super().__init__(config)
-        self.layer_norm = None 
+        self.layer_norm = None  # remove it
 
     def forward(self, hidden_states, attention_mask=None, output_attentions=False, 
                 output_hidden_states=False, return_dict=True):
@@ -60,6 +146,83 @@ class Wav2Vec2EncoderNoLN(Wav2Vec2Encoder):
             attentions=all_self_attentions,
         )
 
+class Wav2Vec2EncoderStableLayerNorm(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.pos_conv_embed = Wav2Vec2PositionalConvEmbedding(config)
+        # self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout)
+        self.layers = nn.ModuleList(
+            [Wav2Vec2EncoderLayerStableLayerNorm(config) for _ in range(config.num_hidden_layers)]
+        )
+        self.gradient_checkpointing = False
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
+    ):
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+
+        if attention_mask is not None:
+            # make sure padded tokens output 0
+            expand_attention_mask = attention_mask.unsqueeze(-1).repeat(1, 1, hidden_states.shape[2])
+            hidden_states[~expand_attention_mask] = 0
+
+        # attention_mask = create_bidirectional_mask(
+        #     config=self.config,
+        #     input_embeds=hidden_states,
+        #     attention_mask=attention_mask,
+        # )
+
+        position_embeddings = self.pos_conv_embed(hidden_states)
+        hidden_states = hidden_states + position_embeddings
+        hidden_states = self.dropout(hidden_states)
+
+        # synced_gpus = is_deepspeed_zero3_enabled() or is_fsdp_managed_module(self)
+
+        synced_gpus = False
+
+        for layer in self.layers:
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            # add LayerDrop (see https://huggingface.co/papers/1909.11556 for description)
+            dropout_probability = torch.rand([])
+
+            skip_the_layer = self.training and dropout_probability < self.config.layerdrop
+            if not skip_the_layer or synced_gpus:
+                # under fsdp or deepspeed zero3 all gpus must run in sync
+                # XXX: could optimize this like synced_gpus in generate_utils but not sure if it's worth the code complication
+                layer_outputs = layer(
+                    hidden_states, attention_mask=attention_mask, output_attentions=output_attentions
+                )
+                hidden_states = layer_outputs[0]
+
+            if skip_the_layer:
+                layer_outputs = (None, None)
+
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+
+        # hidden_states = self.layer_norm(hidden_states)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+        if not return_dict:
+            return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+        )
+
 
 class Wav2Vec2LlamaModel(PreTrainedModel):
     """
@@ -77,7 +240,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         
         # Audio encoder (Wav2Vec2)
         self.wav2vec2 = Wav2Vec2Model(config.wav2vec2_config)
-        self.wav2vec2.encoder = Wav2Vec2EncoderNoLN(config.wav2vec2_config)
+        self.wav2vec2.encoder = Wav2Vec2EncoderStableLayerNorm(config.wav2vec2_config)
         
         # Layer norm BEFORE projection (matches fairseq2)
         self.encoder_layer_norm = nn.LayerNorm(config.wav2vec2_config.hidden_size)
@@ -102,6 +265,13 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             config.llama_config.vocab_size + config.n_special_characters, 
             config.llama_config.model_dim
         )
+        
+        # Adjust vocab size for special tokens
+        # self.llama.lm_head = nn.Linear(
+        #     config.llama_config.hidden_size, 
+        #     config.llama_config.vocab_size, 
+        #     bias=False
+        # )
         
         # Special tokens
         self.special_tokens = Wav2Vec2LlamaSpecialTokens(
