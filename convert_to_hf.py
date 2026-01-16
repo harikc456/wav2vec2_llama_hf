@@ -97,7 +97,7 @@ def _map_fairseq2_to_hf_keys(fairseq2_state_dict: dict) -> dict:
             new_key = old_key.replace('llama_decoder.', "llama.model.")
             
             if "self_attn_layer_norm" in new_key:
-                new_key = new_key.replace("self_attn_layer_norm", "post_attention_layernorm")
+                new_key = new_key.replace("self_attn_layer_norm", "input_layernorm")
 
             elif "ffn.inner_proj" in new_key:
                 new_key = new_key.replace("ffn.inner_proj", "mlp.up_proj")
@@ -112,7 +112,7 @@ def _map_fairseq2_to_hf_keys(fairseq2_state_dict: dict) -> dict:
                 new_key = new_key.replace("self_attn.output_proj", "self_attn.o_proj")
 
             elif "ffn_layer_norm" in new_key:
-                new_key = new_key.replace("ffn_layer_norm", "input_layernorm")
+                new_key = new_key.replace("ffn_layer_norm", "post_attention_layernorm")
 
             elif ".layer_norm.weight" in new_key:
                 new_key = new_key.replace(".layer_norm.weight", ".norm.weight")
@@ -242,8 +242,10 @@ if __name__ == "__main__":
         num_key_value_heads=8,
         hidden_size=4096,
         rope_theta=10_000.0,
+        max_position_embeddings=8192,
         intermediate_size=2816,
         tie_word_embeddings=False,
+        rms_norm_eps=1e-5
     )
 
     wav2vec2_config = Wav2Vec2Config(

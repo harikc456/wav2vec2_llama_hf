@@ -52,15 +52,15 @@ class Wav2Vec2LlamaSpecialTokens:
     """Special tokens for different syntaxes"""
     def __init__(self, vocab_size: int):
         # Use last tokens in vocab for special markers
-        self.lid_marker = vocab_size - 1
-        self.context_start = vocab_size - 2
-        self.context_end = vocab_size - 3
-        self.context_example_start = vocab_size - 4
-        self.context_example_end = vocab_size - 5
-        self.context_bos = vocab_size - 6
-        self.context_eos = vocab_size - 7
-        self.regular_segment = vocab_size - 8
-        self.last_segment = vocab_size - 9
+        self.lid_marker = vocab_size
+        self.context_start = vocab_size
+        self.context_end = vocab_size + 1
+        self.context_example_start = vocab_size + 2
+        self.context_example_end = vocab_size + 3
+        self.context_bos = vocab_size + 4
+        self.context_eos = vocab_size + 5
+        self.regular_segment = vocab_size + 2
+        self.last_segment = vocab_size + 1
 
 
 class Wav2Vec2LlamaConfig(PretrainedConfig):
@@ -105,47 +105,6 @@ class Wav2Vec2LlamaConfig(PretrainedConfig):
         self.n_special_tokens = n_special_tokens
 
 
-class Wav2Vec2EncoderNoLN(Wav2Vec2Encoder):
-    def __init__(self, config):
-        super().__init__(config)
-        self.layer_norm = None  # remove it
-
-    def forward(self, hidden_states, attention_mask=None, output_attentions=False, 
-                output_hidden_states=False, return_dict=True):
-        
-        hidden_states = self.pos_conv_embed(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-    
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
-    
-        for layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-    
-            # FIX: Layer returns tuple, extract hidden_states
-            layer_outputs = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-            )
-            hidden_states = layer_outputs[0]  # <-- THIS IS THE KEY FIX
-            
-            if output_attentions:
-                all_self_attentions = all_self_attentions + (layer_outputs[1],)
-    
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
-    
-        if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
-        
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attentions,
-        )
-
 class Wav2Vec2EncoderStableLayerNorm(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -173,12 +132,6 @@ class Wav2Vec2EncoderStableLayerNorm(nn.Module):
             # make sure padded tokens output 0
             expand_attention_mask = attention_mask.unsqueeze(-1).repeat(1, 1, hidden_states.shape[2])
             hidden_states[~expand_attention_mask] = 0
-
-        # attention_mask = create_bidirectional_mask(
-        #     config=self.config,
-        #     input_embeds=hidden_states,
-        #     attention_mask=attention_mask,
-        # )
 
         position_embeddings = self.pos_conv_embed(hidden_states)
         hidden_states = hidden_states + position_embeddings
@@ -274,9 +227,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         # )
         
         # Special tokens
-        self.special_tokens = Wav2Vec2LlamaSpecialTokens(
-            config.llama_config.vocab_size
-        )
+        self.special_tokens = Wav2Vec2LlamaSpecialTokens(9812)  # Hardcoding 9812 for now
         
         self.post_init()
     
@@ -399,8 +350,10 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         max_len = max(total_lens)
         
         # Add SDPA workaround padding only during training
-        if add_padding:
-            max_len += 1
+        # if add_padding:
+        #     max_len += 1
+
+        max_len += 1
         
         # Initialize tensors
         concat_embeds = torch.zeros(B, max_len, hidden_size, device=device, dtype=dtype)
@@ -669,10 +622,12 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
                 loss=False,
                 embedded=False
             ))
-        
-        # CRITICAL: BOS is part of context for generation
-        bos = torch.full((B, 1), self.config.bos_token_id, 
-                        dtype=torch.long, device=device)
+
+        # Adding BOS, target seqs and EOS
+
+        bos = torch.full((B, 1), 0, dtype=torch.long, device=device)
+        eos = torch.full((B, 1), 2, dtype=torch.long, device=device)
+
         inputs.append(ModalityInput(
             modality=Modality.TEXT,
             seqs=bos,
@@ -680,23 +635,54 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             loss=False,
             embedded=False
         ))
+
+        inputs.append(ModalityInput(
+                modality=Modality.TEXT,
+                seqs=torch.zeros(1, 1, dtype=torch.long, device=device),
+                seq_lens=[1] * B,
+                loss=True,
+        ))
+
+        inputs.append(ModalityInput(
+            modality=Modality.TEXT,
+            seqs=eos,
+            seq_lens=[1] * B,
+            loss=False,
+            embedded=False
+        ))
+
         
         # Embed all inputs
         inputs = self.embed_inputs(inputs, dtype)
-        
         # Concatenate (no padding for generation)
         inputs_embeds, _, total_lens = self._concat_inputs(
             inputs, device, dtype, add_padding=False
         )
         
         # Trim to actual lengths
-        max_context_len = max(total_lens)
+        max_context_len = max(total_lens) + 1
         inputs_embeds = inputs_embeds[:, :max_context_len, :]
         
         # Create attention mask
         attention_mask = torch.zeros(B, max_context_len, dtype=torch.long, device=device)
         for i, length in enumerate(total_lens):
             attention_mask[i, :length] = 1
+
+        position_ids = torch.arange(
+            max_context_len, 
+            dtype=torch.long, 
+            device=device
+        ).unsqueeze(0).expand(B, -1)
+
+        self.llama.config._attn_implementation = "sdpa"
+
+        logits = self.llama(
+            inputs_embeds=inputs_embeds, 
+            # position_ids=position_ids,
+            attention_mask=attention_mask, 
+        )
+
+        # print(logits)
         
         # Generate using HuggingFace's generate
         outputs = self.llama.generate(
