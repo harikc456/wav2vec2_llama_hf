@@ -5,6 +5,12 @@ from config import Wav2Vec2LlamaConfig, LlamaConfig
 from wav2vec2_llama import Wav2Vec2LlamaModel
 from transformers import Wav2Vec2Config
 
+
+def permute(w, n_heads, dim1=4096, dim2=4096):
+    """Permute weights for rotary embeddings."""
+    return w.view(n_heads, dim1 // n_heads // 2, 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+
+
 def _map_fairseq2_to_hf_keys(fairseq2_state_dict: dict) -> dict:
     """
     Map fairseq2 state dict keys to HuggingFace format.
@@ -57,7 +63,7 @@ def _map_fairseq2_to_hf_keys(fairseq2_state_dict: dict) -> dict:
 
             elif "self_attn.q_proj" in temp_key:
                 new_key = temp_key.replace("self_attn.q_proj", "attention.q_proj")
-
+              
             elif "self_attn.k_proj" in temp_key:
                 new_key = temp_key.replace("self_attn.k_proj", "attention.k_proj")
 
@@ -95,7 +101,13 @@ def _map_fairseq2_to_hf_keys(fairseq2_state_dict: dict) -> dict:
         
         elif old_key.startswith('llama_decoder.'):
             new_key = old_key.replace('llama_decoder.', "llama.model.")
-            
+
+            if "q_proj" in new_key:
+                value = permute(value, config.llama_config.num_attention_heads, dim1=config.llama_config.hidden_size, dim2=config.llama_config.hidden_size)
+
+            if "k_proj" in new_key:
+                value = permute(value, config.llama_config.num_attention_heads, dim1=config.llama_config.hidden_size, dim2=config.llama_config.hidden_size)
+
             if "self_attn_layer_norm" in new_key:
                 new_key = new_key.replace("self_attn_layer_norm", "input_layernorm")
 

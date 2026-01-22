@@ -660,7 +660,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         )
         
         # Trim to actual lengths
-        max_context_len = max(total_lens) + 1
+        max_context_len = max(total_lens)
         inputs_embeds = inputs_embeds[:, :max_context_len, :]
         
         # Create attention mask
@@ -676,19 +676,12 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
 
         self.llama.config._attn_implementation = "sdpa"
 
-        logits = self.llama(
-            inputs_embeds=inputs_embeds, 
-            # position_ids=position_ids,
-            attention_mask=attention_mask, 
-        )
-
-        # print(logits)
-        
         # Generate using HuggingFace's generate
         outputs = self.llama.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
+            position_ids=position_ids,
             num_beams=num_beams,
             pad_token_id=self.config.pad_token_id,
             eos_token_id=self.config.eos_token_id,
