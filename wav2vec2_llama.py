@@ -331,7 +331,6 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         inputs: List[ModalityInput],
         device: torch.device,
         dtype: torch.dtype,
-        add_padding: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
         """
         Concatenate inputs matching fairseq2's concat_inputs.
@@ -348,12 +347,6 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             for b in range(B)
         ]
         max_len = max(total_lens)
-        
-        # Add SDPA workaround padding only during training
-        # if add_padding:
-        #     max_len += 1
-
-        max_len += 1
         
         # Initialize tensors
         concat_embeds = torch.zeros(B, max_len, hidden_size, device=device, dtype=dtype)
@@ -564,7 +557,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         audio_attention_mask: Optional[torch.Tensor] = None,
         lang_ids: Optional[torch.Tensor] = None,
         max_new_tokens: int = 256,
-        num_beams: int = 5,
+        num_beams: int = 1,
         temperature: float = 1.0,
         top_p: float = 1.0,
         do_sample: bool = False,
@@ -655,9 +648,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         # Embed all inputs
         inputs = self.embed_inputs(inputs, dtype)
         # Concatenate (no padding for generation)
-        inputs_embeds, _, total_lens = self._concat_inputs(
-            inputs, device, dtype, add_padding=False
-        )
+        inputs_embeds, _, total_lens = self._concat_inputs(inputs, device, dtype)
         
         # Trim to actual lengths
         max_context_len = max(total_lens)
@@ -668,20 +659,11 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         for i, length in enumerate(total_lens):
             attention_mask[i, :length] = 1
 
-        position_ids = torch.arange(
-            max_context_len, 
-            dtype=torch.long, 
-            device=device
-        ).unsqueeze(0).expand(B, -1)
-
-        self.llama.config._attn_implementation = "sdpa"
-
         # Generate using HuggingFace's generate
         outputs = self.llama.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            position_ids=position_ids,
             num_beams=num_beams,
             pad_token_id=self.config.pad_token_id,
             eos_token_id=self.config.eos_token_id,
