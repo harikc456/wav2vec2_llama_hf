@@ -218,14 +218,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             config.llama_config.vocab_size + config.n_special_characters, 
             config.llama_config.model_dim
         )
-        
-        # Adjust vocab size for special tokens
-        # self.llama.lm_head = nn.Linear(
-        #     config.llama_config.hidden_size, 
-        #     config.llama_config.vocab_size, 
-        #     bias=False
-        # )
-        
+
         # Special tokens
         self.special_tokens = Wav2Vec2LlamaSpecialTokens(9812)  # Hardcoding 9812 for now
         
@@ -460,6 +453,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             # EOS token
             eos = torch.full((B, 1), self.config.eos_token_id, 
                            dtype=torch.long, device=device)
+            
             inputs.append(ModalityInput(
                 modality=Modality.TEXT,
                 seqs=eos,
@@ -617,9 +611,8 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             ))
 
         # Adding BOS, target seqs and EOS
-
-        bos = torch.full((B, 1), 0, dtype=torch.long, device=device)
-        eos = torch.full((B, 1), 2, dtype=torch.long, device=device)
+        bos = torch.full((B, 1), self.config.bos_token_id, dtype=torch.long, device=device)
+        eos = torch.full((B, 1), self.config.eos_token_id, dtype=torch.long, device=device)
 
         inputs.append(ModalityInput(
             modality=Modality.TEXT,
@@ -651,7 +644,7 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         inputs_embeds, _, total_lens = self._concat_inputs(inputs, device, dtype)
         
         # Trim to actual lengths
-        max_context_len = max(total_lens)
+        max_context_len = max(total_lens) - 1
         inputs_embeds = inputs_embeds[:, :max_context_len, :]
         
         # Create attention mask

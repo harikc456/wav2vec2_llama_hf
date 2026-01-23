@@ -1,6 +1,7 @@
 import gc
 import torch
 import argparse
+import os
 from config import Wav2Vec2LlamaConfig, LlamaConfig
 from wav2vec2_llama import Wav2Vec2LlamaModel
 from transformers import Wav2Vec2Config
@@ -147,16 +148,16 @@ def load_from_fairseq2_checkpoint(
 ) -> Wav2Vec2LlamaModel:
     """
     Load a pretrained model from fairseq2 checkpoint.
-    
+
     Args:
         fairseq2_checkpoint_path: Path to fairseq2 .pt checkpoint file
         config: Optional config, will be inferred from checkpoint if not provided
         auto_detect_langs: If True, automatically detect number of languages from checkpoint
         debug: If True, print detailed information about key mapping
-    
+
     Returns:
         Loaded Wav2Vec2LlamaModel
-    
+
     Example:
         >>> model = load_from_fairseq2_checkpoint("path/to/checkpoint.pt")
     """
@@ -302,6 +303,6 @@ if __name__ == "__main__":
         n_special_characters=n_special_characters,
         vocab_size=vocab_size
     )
-    
+
     print(f"Loading model from: {args.fairseq_checkpoint_path}")
     load_from_fairseq2_checkpoint(args.fairseq_checkpoint_path, config, args.output_path)
