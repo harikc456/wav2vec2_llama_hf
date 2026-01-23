@@ -14,6 +14,7 @@ The primary objective is to create a reliable and easy-to-use pipeline for porti
 - `wav2vec2_llama.py`: The core model definition in Hugging Face `transformers` format.
 - `config.py`: Configuration file for the model parameters.
 - `convert_to_hf.py`: Script to convert original Fairseq checkpoints to the new Hugging Face format.
+- `convert_tokenizer.py`: Standalone script to convert SentencePiece tokenizer to Hugging Face format.
 - `inference.py`: Example script to run inference with the converted model.
 - `push_to_hub.py`: Utility script to upload the converted model to the Hugging Face Hub.
 - `84-121550-0000.flac`: A sample audio file for testing inference.
@@ -38,7 +39,7 @@ The process is broken down into three main steps: converting the model, running 
 
 ### 1. Convert Fairseq Checkpoint
 
-First, you need to convert the original Fairseq model checkpoint to the Hugging Face format.
+First, you need to convert the original Fairseq model checkpoint and tokenizer to the Hugging Face format.
 
 ```bash
 python convert_to_hf.py \
@@ -46,6 +47,15 @@ python convert_to_hf.py \
     --output_path ./hf_model
 ```
 This will create a new directory (`./hf_model` in this case) containing the `pytorch_model.bin`, `config.json`, and other necessary files for a Hugging Face model.
+The tokenizer will be saved in `./hf_model/tokenizer/` subdirectory.
+
+Alternatively, you can convert the tokenizer separately using the standalone script:
+
+```bash
+python convert_tokenizer.py \
+    --spm_model_path /path/to/your/sentencepiece/model \
+    --output_dir ./hf_model/tokenizer
+```
 
 ### 2. Run Inference
 
