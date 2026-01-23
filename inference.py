@@ -36,7 +36,6 @@ def main():
         generated_ids = model.generate(
             audio_values=inputs['input_values'],
             audio_attention_mask=inputs['attention_mask'],
-            max_new_tokens=64,
         )
     
     transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
