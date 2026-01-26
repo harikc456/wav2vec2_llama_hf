@@ -1,4 +1,4 @@
-# Fairseq Omnilingual Wav2Vec2-LLaMA to Hugging Face Port
+# Fairseq Omnilingual Speech Recognition Models to Hugging Face Port
 
 This repository provides scripts and code to run inference with pre-converted Fairseq Omnilingual models using the Hugging Face `transformers` library. Supports both:
 - **CTC (Connectionist Temporal Classification)** models: Models with feature extractor, wav2vec2 encoder, and final projection layer (without Llama decoder)
@@ -6,9 +6,10 @@ This repository provides scripts and code to run inference with pre-converted Fa
 
 ## Repository Structure
 
-- `wav2vec2_llama.py`: The core model definition in Hugging Face `transformers` format.
+- `wav2vec2_llama.py`: Model definition for Fairseq2's Omnilingual LLM models (hybrid Wav2Vec2-LLaMA architectures).
+- `omnilingual_ctc.py`: Model definition for CTC-based omnilingual speech recognition models.
 - `config.py`: Configuration file for the model parameters.
-- `inference.py`: Example script to run inference with remote models.
+- `inference.py`: Example script to run inference with remote LLM models.
 - `inference_ctc.py`: Example script to run inference with remote CTC models.
 - `audio/84-121550-0000.flac`: A sample audio file for testing inference.
 
@@ -57,7 +58,7 @@ The following models are available on the Hugging Face Hub. You can use them dir
 
 ## Acknowledgements
 
-- This work is heavily based on the original Omnilingual model from Fairseq/Meta AI.
+- This work is based on the original Omnilingual models from Fairseq/Meta AI, supporting both CTC and LLM architectures.
 - Great appreciation to the Hugging Face team for their work on the `transformers` library and the tools that make sharing and using models straightforward.
 
 ## License
