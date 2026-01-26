@@ -19,7 +19,7 @@ from transformers import (
     PretrainedConfig,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2Encoder, Wav2Vec2PositionalConvEmbedding, Wav2Vec2EncoderLayerStableLayerNorm
+from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2PositionalConvEmbedding, Wav2Vec2EncoderLayerStableLayerNorm
 from transformers.modeling_outputs import BaseModelOutput
 
 
