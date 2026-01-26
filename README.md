@@ -10,7 +10,7 @@ This repository provides scripts and code to run inference with pre-converted Fa
 - `config.py`: Configuration file for the model parameters.
 - `inference.py`: Example script to run inference with remote models.
 - `inference_ctc.py`: Example script to run inference with remote CTC models.
-- `84-121550-0000.flac`: A sample audio file for testing inference.
+- `audio/84-121550-0000.flac`: A sample audio file for testing inference.
 
 ## Setup
 
@@ -35,7 +35,7 @@ Run inference on audio files using pre-converted models from the Hugging Face Hu
 # Using a pre-converted model from Hugging Face Hub
 python inference.py \
     --model_path harikc456/wav2vec2-llama-300m \
-    --audio_file 84-121550-0000.flac
+    --audio_file audio/84-121550-0000.flac
 ```
 
 **For CTC (Connectionist Temporal Classification) models:** (Models without Llama decoder)
@@ -43,7 +43,7 @@ python inference.py \
 # Using a pre-converted CTC model from Hugging Face Hub
 python inference_ctc.py \
     --model_path harikc456/omnilingual-ctc-300m-v2 \
-    --audio_file 84-121550-0000.flac
+    --audio_file audio/84-121550-0000.flac
 ```
 
 The scripts will load the remote model, process the audio file, and print the transcribed text. Note that CTC models typically provide more direct ASR-style transcriptions, while LLM models may produce more conversational responses.
