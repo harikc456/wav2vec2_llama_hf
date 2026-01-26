@@ -2,7 +2,6 @@ import argparse
 import torch
 import torchaudio
 from transformers import AutoTokenizer, Wav2Vec2Processor, Wav2Vec2FeatureExtractor
-from feature_extractor import OmniASRFeatureExtractor
 from omnilingual_ctc import OmnilingualModelForCTC
 
 def main():
@@ -65,7 +64,6 @@ def main():
 
     # Use HuggingFace's built-in CTC decoding to handle repeated characters properly
     predicted_ids = torch.argmax(logits, dim=-1)
-    print(tokenizer.pad_token_id, tokenizer.bos_token)
     transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
 
     print("\n" + "="*50)
