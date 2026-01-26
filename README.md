@@ -1,29 +1,22 @@
 # Fairseq Omnilingual Wav2Vec2-LLaMA to Hugging Face Port
 
-This repository provides scripts and code to convert the Fairseq Omnilingual model, a hybrid Wav2Vec2-LLaMA architecture, into a format compatible with the Hugging Face `transformers` library. The goal is to make this powerful speech recognition model more accessible to the wider community by leveraging the Hugging Face ecosystem.
-
-## Project Goal
-
-The primary objective is to create a reliable and easy-to-use pipeline for porting the original Fairseq checkpoints to a `transformers`-native format. This allows users to:
-- Run inference using the familiar `AutoModel` and `pipeline` APIs.
-- Share the converted model on the Hugging Face Hub.
-- Integrate the model into other `transformers`-based projects and applications.
+This repository provides scripts and code to run inference with pre-converted Fairseq Omnilingual models using the Hugging Face `transformers` library. Supports both:
+- **CTC (Connectionist Temporal Classification)** models: Models with feature extractor, wav2vec2 encoder, and final projection layer (without Llama decoder)
+- **LLM (Large Language Model)** models: Hybrid Wav2Vec2-LLaMA architectures with both encoder and decoder
 
 ## Repository Structure
 
 - `wav2vec2_llama.py`: The core model definition in Hugging Face `transformers` format.
 - `config.py`: Configuration file for the model parameters.
-- `convert_to_hf.py`: Script to convert original Fairseq checkpoints to the new Hugging Face format.
-- `convert_tokenizer.py`: Standalone script to convert SentencePiece tokenizer to Hugging Face format.
-- `inference.py`: Example script to run inference with the converted model.
-- `push_to_hub.py`: Utility script to upload the converted model to the Hugging Face Hub.
+- `inference.py`: Example script to run inference with remote models.
+- `inference_ctc.py`: Example script to run inference with remote CTC models.
 - `84-121550-0000.flac`: A sample audio file for testing inference.
 
 ## Setup
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/wav2vec2_llama_hf.git
+    git clone https://github.com/harikc456/wav2vec2_llama_hf.git
     cd wav2vec2_llama_hf
     ```
 
@@ -33,75 +26,34 @@ The primary objective is to create a reliable and easy-to-use pipeline for porti
     pip install -r requirements.txt
     ```
 
-## Usage
+## Inference with Remote Models
 
-The process is broken down into three main steps: converting the model, running inference, and (optionally) pushing it to the Hub.
+Run inference on audio files using pre-converted models from the Hugging Face Hub.
 
-### 1. Convert Fairseq Checkpoint
-
-First, you need to convert the original Fairseq model checkpoint and tokenizer to the Hugging Face format.
-
+**For LLM (Large Language Model) models:** (Hybrid Wav2Vec2-LLaMA models)
 ```bash
-python convert_to_hf.py \
-    --fairseq_checkpoint_path /path/to/your/fairseq/model.pt \
-    --output_path ./hf_model
-```
-This will create a new directory (`./hf_model` in this case) containing the `pytorch_model.bin`, `config.json`, and other necessary files for a Hugging Face model.
-The tokenizer will be saved in `./hf_model/tokenizer/` subdirectory.
-
-Alternatively, you can convert the tokenizer separately using the standalone script:
-
-```bash
-python convert_tokenizer.py \
-    --spm_model_path /path/to/your/sentencepiece/model \
-    --output_dir ./hf_model/tokenizer
-```
-
-### 2. Run Inference
-
-Once the model is converted, you can run inference on an audio file. The repository includes a sample FLAC file for quick testing.
-
-```bash
+# Using a pre-converted model from Hugging Face Hub
 python inference.py \
     --model_path harikc456/wav2vec2-llama-300m \
     --audio_file 84-121550-0000.flac
 ```
-The script will load the converted model, process the audio file, and print the transcribed text.
 
-### 3. Push to Hugging Face Hub
-
-To share your converted model with the community, you can upload it to the Hugging Face Hub.
-
-First, make sure you are logged in to your Hugging Face account:
+**For CTC (Connectionist Temporal Classification) models:** (Models without Llama decoder)
 ```bash
-huggingface-cli login
+# Using a pre-converted CTC model from Hugging Face Hub
+python inference_ctc.py \
+    --model_path harikc456/omnilingual-ctc-300m-v2 \
+    --audio_file 84-121550-0000.flac
 ```
 
-Then, run the push script:
-```bash
-python push_to_hub.py \
-    --model_path ./hf_model \
-    --repo_name "your-username/your-model-name"
-```
-This will create a new repository on the Hub under your username and upload the model files.
+The scripts will load the remote model, process the audio file, and print the transcribed text. Note that CTC models typically provide more direct ASR-style transcriptions, while LLM models may produce more conversational responses.
 
 ## Pre-converted Models
 
-The 300m LLM variant of the model is available on the Hugging Face Hub. You can use it directly for inference without needing to convert it yourself.
+The following models are available on the Hugging Face Hub. You can use them directly for inference without needing to convert them yourself.
 
-- **Model:** `harikc456/wav2vec2-llama-300m`
-- **Link:** [https://huggingface.co/harikc456/wav2vec2-llama-300m](https://huggingface.co/harikc456/wav2vec2-llama-300m)
-
-To use this model, you can load it directly with `AutoModelForCTC` and `AutoProcessor` from the `transformers` library:
-
-```python
-from transformers import AutoModelForCTC, AutoProcessor
-
-model_id = "harikc456/wav2vec2-llama-300m"
-
-model = AutoModelForCTC.from_pretrained(model_id)
-processor = AutoProcessor.from_pretrained(model_id)
-```
+- **LLM Model:** `harikc456/wav2vec2-llama-300m`
+- **CTC Model:** `harikc456/omnilingual-ctc-300m-v2`
 
 ## Acknowledgements
 

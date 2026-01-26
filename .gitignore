@@ -1,4 +1,5 @@
 /hf_model
+/hf_model_ctc
 .ipynb_checkpoints
 ./__pycache__
 *.pyc
