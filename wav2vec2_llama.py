@@ -2,107 +2,19 @@
 Wav2Vec2-LLaMA Model for ASR - HuggingFace Port
 Ports the fairseq2 implementation to use HuggingFace Transformers components.
 """
-
-from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
-from enum import Enum
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (
     Wav2Vec2Model,
-    Wav2Vec2Config,
     LlamaForCausalLM,
-    LlamaConfig,
     PreTrainedModel,
-    PretrainedConfig,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from audio_encoder import Wav2Vec2EncoderStableLayerNorm
-
-
-class ModelType(str, Enum):
-    """Model variant types"""
-    LLM_ASR = "llm_asr"
-    LLM_ASR_LID = "llm_asr_lid"  # With Language ID
-    ZERO_SHOT = "zero_shot"  # With in-context learning
-
-
-class Modality(str, Enum):
-    """Input modality types"""
-    AUDIO = "audio"
-    TEXT = "text"
-    LANG = "lang"
-
-
-@dataclass
-class ModalityInput:
-    """Container for multi-modal inputs"""
-    modality: Modality
-    seqs: torch.Tensor
-    seq_lens: List[int]
-    loss: bool = False
-    embedded: bool = False
-
-
-@dataclass
-class Wav2Vec2LlamaSpecialTokens:
-    """Special tokens for different syntaxes"""
-    def __init__(self, vocab_size: int):
-        # Use last tokens in vocab for special markers
-        self.lid_marker = vocab_size
-        self.context_start = vocab_size
-        self.context_end = vocab_size + 1
-        self.context_example_start = vocab_size + 2
-        self.context_example_end = vocab_size + 3
-        self.context_bos = vocab_size + 4
-        self.context_eos = vocab_size + 5
-        self.regular_segment = vocab_size + 2
-        self.last_segment = vocab_size + 1
-
-
-class Wav2Vec2LlamaConfig(PretrainedConfig):
-    """Configuration class for Wav2Vec2-LLaMA model"""
-    
-    model_type = "wav2vec2_llama"
-    
-    def __init__(
-        self,
-        wav2vec2_config: Optional[dict] = None,
-        llama_config: Optional[dict] = None,
-        model_variant: str = "llm_asr",
-        encoder_stacking: int = 1,
-        max_generation_length: int = 8192,
-        lang_embeddings_p: float = 0.0,
-        n_lang_embeddings: Optional[int] = None,
-        n_special_tokens: Optional[int] = 0,
-        n_context_examples: int = 0,
-        pad_token_id: int = 0,
-        bos_token_id: int = 1,
-        eos_token_id: int = 2,
-        **kwargs
-    ):
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            **kwargs
-        )
-        
-        # Initialize sub-configs
-        self.wav2vec2_config = Wav2Vec2Config(**wav2vec2_config) if wav2vec2_config else Wav2Vec2Config()
-        self.llama_config = LlamaConfig(**llama_config) if llama_config else LlamaConfig()
-        
-        # Model-specific parameters
-        self.model_variant = ModelType(model_variant)
-        self.encoder_stacking = encoder_stacking
-        self.max_generation_length = max_generation_length
-        self.lang_embeddings_p = lang_embeddings_p
-        self.n_lang_embeddings = n_lang_embeddings
-        self.n_context_examples = n_context_examples
-        self.n_special_tokens = n_special_tokens
-
+from config import Wav2Vec2LlamaConfig
 
 class Wav2Vec2LlamaModel(PreTrainedModel):
     """
@@ -142,17 +54,14 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         # LLaMA decodern_special_tokens
         self.llama = LlamaForCausalLM(config.llama_config)
         self.llama.model.embed_tokens = nn.Embedding(
-            config.llama_config.vocab_size + config.n_special_characters, 
+            config.llama_config.vocab_size + config.n_special_tokens,
             config.llama_config.model_dim
         )
 
-        # Special tokens
-        self.special_tokens = Wav2Vec2LlamaSpecialTokens(9812)  # Hardcoding 9812 for now
-        
         self.post_init()
     
     def embed_audio(
-        self, 
+        self,
         audio_values: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, List[int]]:
@@ -167,32 +76,32 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
 
         # Layer norm BEFORE stacking
         encoded = self.encoder_layer_norm(encoded)
-        
+
         # Stack frames
         B, T, D = encoded.shape
         if self.config.encoder_stacking > 1:
             if T % self.config.encoder_stacking != 0:
                 n_padding = self.config.encoder_stacking - (T % self.config.encoder_stacking)
-                encoded = F.pad(encoded, (0, 0, 0, n_padding))
+                encoded = F.pad(encoded, (0, 0, 0, n_padding), value=0)
                 T = encoded.shape[1]
-            
+
             encoded = encoded.view(
                 B,
                 T // self.config.encoder_stacking,
                 D * self.config.encoder_stacking
             )
-        
+
         # Compute sequence lengths
         if attention_mask is not None:
-            original_lens = attention_mask.sum(dim=1)
-            seq_lens = torch.where(
-                (original_lens % self.config.encoder_stacking) == 0,
-                original_lens // self.config.encoder_stacking,
-                original_lens // self.config.encoder_stacking + 1
+            original_lens = attention_mask.sum(dim=1, dtype=torch.int32)
+            seq_lens = torch.div(
+                original_lens + self.config.encoder_stacking - 1,
+                self.config.encoder_stacking,
+                rounding_mode='trunc'
             ).tolist()
         else:
             seq_lens = [encoded.shape[1]] * B
-        
+
         # Project AFTER stacking
         encoded = self.encoder_proj(encoded)
         return encoded, seq_lens
@@ -209,88 +118,125 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
     
     def embed_inputs(
         self,
-        inputs: List[ModalityInput],
-        dtype: torch.dtype
-    ) -> List[ModalityInput]:
+        audio_seqs: Optional[torch.Tensor] = None,
+        text_seqs: Optional[torch.Tensor] = None,
+        lang_seqs: Optional[torch.Tensor] = None,
+        audio_attention_mask: Optional[torch.Tensor] = None,
+        dtype: torch.dtype = torch.float32
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        Embed all modalities, matching fairseq2's embed_inputs.
-        Modifies inputs in-place.
+        Embed all modalities separately without using ModalityInput objects.
+        Returns embedded sequences for each modality.
+
+        Args:
+            audio_seqs: Audio input tensor
+            text_seqs: Text input tensor
+            lang_seqs: Language ID input tensor
+            audio_attention_mask: Attention mask for audio
+            dtype: Data type for embeddings
+
+        Returns:
+            Tuple of (embedded audio, embedded text, embedded language)
         """
-        for inp in inputs:
-            if inp.embedded:
-                continue
-            
-            # Handle zero-length sequences
-            zero_indices = [i for i, length in enumerate(inp.seq_lens) if length == 0]
-            if zero_indices:
-                max_len = inp.seqs.size(-1)
-                for i in zero_indices:
-                    inp.seq_lens[i] = max_len
-            
-            # Embed based on modality
-            if inp.modality == Modality.AUDIO:
-                inp.seqs, inp.seq_lens = self.embed_audio(inp.seqs)
-            elif inp.modality == Modality.TEXT:
-                inp.seqs = self.embed_text(inp.seqs).to(dtype)
-            elif inp.modality == Modality.LANG:
-                inp.seqs = self.embed_lang(inp.seqs).to(dtype)
-            else:
-                raise ValueError(f"Unknown modality: {inp.modality}")
-            
-            inp.embedded = True
-            
-            # Restore zero lengths
-            if zero_indices:
-                for i in zero_indices:
-                    inp.seq_lens[i] = 0
-        
-        return inputs
+        embedded_audio_seqs = None
+        embedded_text_seqs = None
+        embedded_lang_seqs = None
+
+        # Handle audio embedding
+        if audio_seqs is not None:
+            embedded_audio_seqs, _ = self.embed_audio(audio_seqs, attention_mask=audio_attention_mask)
+
+        # Handle text embedding
+        if text_seqs is not None:
+            embedded_text_seqs = self.embed_text(text_seqs).to(dtype)
+
+        # Handle language embedding
+        if lang_seqs is not None:
+            embedded_lang_seqs = self.embed_lang(lang_seqs).to(dtype)
+
+        return embedded_audio_seqs, embedded_text_seqs, embedded_lang_seqs
     
     def _concat_inputs(
         self,
-        inputs: List[ModalityInput],
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
+        embedded_audio_seqs: Optional[torch.Tensor] = None,
+        audio_loss_flags: Optional[List[bool]] = None,
+        embedded_text_seqs: Optional[torch.Tensor] = None,
+        text_loss_flags: Optional[List[bool]] = None,
+        embedded_lang_seqs: Optional[torch.Tensor] = None,
+        lang_loss_flags: Optional[List[bool]] = None,
+        device: torch.device = None,
+        dtype: torch.dtype = torch.float32,
+        add_padding: bool = True
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Concatenate inputs matching fairseq2's concat_inputs.
-        
+        Concatenate inputs without using ModalityInput objects.
+
         CRITICAL FIX: Loss mask marks positions where we predict the NEXT token.
         Position i in loss_mask=True means we use logits[i] to predict targets[i].
+
+        Returns:
+            Tuple of (concatenated embeddings, loss mask)
         """
-        B = inputs[0].seqs.shape[0]
-        hidden_size = inputs[0].seqs.shape[-1]
-        
+        # Determine batch size from the first available tensor
+        B = None
+        hidden_size = None
+
+        if embedded_audio_seqs is not None:
+            B = embedded_audio_seqs.shape[0]
+            hidden_size = embedded_audio_seqs.shape[-1]
+        elif embedded_text_seqs is not None:
+            B = embedded_text_seqs.shape[0]
+            hidden_size = embedded_text_seqs.shape[-1]
+        elif embedded_lang_seqs is not None:
+            B = embedded_lang_seqs.shape[0]
+            hidden_size = embedded_lang_seqs.shape[-1]
+
+        if B is None or hidden_size is None:
+            raise ValueError("At least one modality must be provided")
+
+        # Prepare sequence data for concatenation
+        seq_info = []
+
+        if embedded_audio_seqs is not None:
+            seq_info.append((embedded_audio_seqs, [embedded_audio_seqs.shape[1]] * B, audio_loss_flags))
+
+        if embedded_text_seqs is not None:
+            seq_info.append((embedded_text_seqs, [embedded_text_seqs.shape[1]] * B, text_loss_flags))
+
+        if embedded_lang_seqs is not None:
+            seq_info.append((embedded_lang_seqs, [embedded_lang_seqs.shape[1]] * B, lang_loss_flags))
+
         # Compute total lengths
-        total_lens = [
-            sum(inp.seq_lens[b] for inp in inputs)
-            for b in range(B)
-        ]
-        max_len = max(total_lens)
-        
+        total_lens = []
+        for b in range(B):
+            total_len = sum(seq_lens[b] for _, seq_lens, _ in seq_info)
+            total_lens.append(total_len)
+
+        max_len = max(total_lens) if add_padding else max(total_lens)
+
         # Initialize tensors
         concat_embeds = torch.zeros(B, max_len, hidden_size, device=device, dtype=dtype)
         loss_mask = torch.zeros(B, max_len, dtype=torch.bool, device=device)
-        
+
         # Fill concatenated sequence
         for b in range(B):
             pos = 0
-            for inp in inputs:
-                length = inp.seq_lens[b]
+            for seqs, seq_lens, loss_flags in seq_info:
+                length = seq_lens[b]
                 if length > 0:
-                    concat_embeds[b, pos:pos+length] = inp.seqs[b, :length]
-                    
+                    concat_embeds[b, pos:pos+length] = seqs[b, :length]
+
                     # CRITICAL: Loss mask at position i predicts token at position i
                     # We mark from (pos-1) to (pos-1+length) because:
                     # - The model sees tokens at positions [0...pos-1]
                     # - And predicts tokens at positions [pos...pos+length-1]
                     # - So logits[pos-1] predicts the first token of this segment
-                    if inp.loss and pos > 0:
+                    if loss_flags and loss_flags[b] and pos > 0:
                         loss_mask[b, pos-1:pos-1+length] = True
-                    
+
                     pos += length
-        
-        return concat_embeds, loss_mask, total_lens
+
+        return concat_embeds, loss_mask
     
     def forward(
         self,
@@ -307,102 +253,83 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
         Forward pass - FIXED to match fairseq2 exactly.
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+
         if audio_values is None:
             raise ValueError("audio_values must be provided")
-        
+
         B = audio_values.shape[0]
         device = audio_values.device
         dtype = next(self.parameters()).dtype
-        
-        # Create un-embedded inputs (fairseq2 approach)
-        audio_seq_lens = (audio_attention_mask.sum(dim=1).tolist() 
-                         if audio_attention_mask is not None 
-                         else [audio_values.shape[1]] * B)
-        
-        inputs = [ModalityInput(
-            modality=Modality.AUDIO,
-            seqs=audio_values,
-            seq_lens=audio_seq_lens,
-            loss=False,
-            embedded=False
-        )]
-        
+
+        # Embed audio
+        embedded_audio, embedded_audio_seq_lens = self.embed_audio(audio_values, attention_mask=audio_attention_mask)
+        audio_loss_flags = [False] * B  # Audio segments don't contribute to loss
+
+        # Prepare text and language inputs
+        text_loss_flags = [False] * B  # Initialize with default value
+
         # Add language ID if configured
         if self.lang_embeddings is not None:
-            # LID marker first
-            lid_marker = torch.full((B, 1), self.special_tokens.lid_marker, 
+            # LID marker
+            lid_marker = torch.full((B, 1), self.config.lid_marker_id,
                                    dtype=torch.long, device=device)
-            inputs.append(ModalityInput(
-                modality=Modality.TEXT,
-                seqs=lid_marker,
-                seq_lens=[1] * B,
-                loss=False,
-                embedded=False
-            ))
-            
-            # Language ID second
+            lid_marker_embedded = self.embed_text(lid_marker).to(dtype)
+
+            # Language ID
             if lang_ids is not None:
                 lang_id_tensor = lang_ids.unsqueeze(1) if lang_ids.dim() == 1 else lang_ids
             else:
                 lang_id_tensor = torch.zeros(B, 1, dtype=torch.long, device=device)
-            
-            inputs.append(ModalityInput(
-                modality=Modality.LANG,
-                seqs=lang_id_tensor,
-                seq_lens=[1] * B,
-                loss=False,
-                embedded=False
-            ))
-        
-        # BOS token
-        bos = torch.full((B, 1), self.config.bos_token_id, 
-                        dtype=torch.long, device=device)
-        inputs.append(ModalityInput(
-            modality=Modality.TEXT,
-            seqs=bos,
-            seq_lens=[1] * B,
-            loss=False,
-            embedded=False
-        ))
-        
+
+            embedded_lang = self.embed_lang(lang_id_tensor).to(dtype)
+
+            # Combine with language embedding if present
+            # Concatenate LID marker, language ID, and BOS
+            bos = torch.full((B, 1), self.config.bos_token_id, dtype=torch.long, device=device)
+            bos_embedded = self.embed_text(bos).to(dtype)
+            combined_text = torch.cat([lid_marker_embedded, embedded_lang, bos_embedded], dim=1)
+        else:
+            # Just BOS token
+            bos = torch.full((B, 1), self.config.bos_token_id, dtype=torch.long, device=device)
+            combined_text = self.embed_text(bos).to(dtype)
+
         # Add text if provided (training mode)
         if input_ids is not None:
-            text_lens = (input_ids != self.config.pad_token_id).sum(dim=1).tolist()
-            inputs.append(ModalityInput(
-                modality=Modality.TEXT,
-                seqs=input_ids,
-                seq_lens=text_lens,
-                loss=True,
-                embedded=False
-            ))
-            
-            # EOS token
-            eos = torch.full((B, 1), self.config.eos_token_id, 
-                           dtype=torch.long, device=device)
-            
-            inputs.append(ModalityInput(
-                modality=Modality.TEXT,
-                seqs=eos,
-                seq_lens=[1] * B,
-                loss=True,
-                embedded=False
-            ))
-        
-        # Embed all inputs
-        inputs = self.embed_inputs(inputs, dtype)
-        
-        # Concatenate
-        inputs_embeds, loss_mask, total_lens = self._concat_inputs(
-            inputs, device, dtype, add_padding=(labels is not None)
+            # Embed the input text
+            input_text_embedded = self.embed_text(input_ids).to(dtype)
+
+            # Concatenate with existing text (LID marker + lang ID + BOS)
+            combined_text = torch.cat([combined_text, input_text_embedded], dim=1)
+
+            # Update loss flags - Input text contributes to loss
+            text_loss_flags = [True] * B  # Input text contributes to loss
+
+            # Add EOS token
+            eos = torch.full((B, 1), self.config.eos_token_id, dtype=torch.long, device=device)
+            eos_embedded = self.embed_text(eos).to(dtype)
+            combined_text = torch.cat([combined_text, eos_embedded], dim=1)
+
+        # Now concatenate all embedded inputs
+        inputs_embeds, loss_mask = self._concat_inputs(
+            embedded_audio_seqs=embedded_audio,
+            audio_loss_flags=audio_loss_flags,
+            embedded_text_seqs=combined_text,
+            text_loss_flags=text_loss_flags,
+            embedded_lang_seqs=None,  # Already handled above
+            lang_loss_flags=None,
+            device=device,
+            dtype=dtype,
+            add_padding=(labels is not None)
         )
-        
-        # Create attention mask
+
+        # Calculate total lens from the concatenated inputs
+        total_lens = [inputs_embeds.shape[1]] * B
+
+        # Create attention mask using torch.arange for efficiency
         max_len = inputs_embeds.shape[1]
-        inputs_attention_mask = torch.zeros(B, max_len, dtype=torch.long, device=device)
-        for i, length in enumerate(total_lens):
-            inputs_attention_mask[i, :length] = 1
-        
+        position_ids = torch.arange(max_len, device=device).unsqueeze(0).expand(B, -1)
+        inputs_attention_mask = (position_ids < torch.tensor(total_lens, device=device).unsqueeze(1)).long()
+
         # Forward through LLaMA
         outputs = self.llama.model(
             inputs_embeds=inputs_embeds,
@@ -410,15 +337,15 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             return_dict=True,
             **kwargs
         )
-        
+
         hidden_states = outputs.last_hidden_state
         logits = self.llama.lm_head(hidden_states)
-        
+
         # Crop to true lengths
         max_true_len = max(total_lens)
         logits = logits[:, :max_true_len, :]
         loss_mask = loss_mask[:, :max_true_len]
-        
+
         # Compute loss if labels provided
         loss = None
         if labels is not None:
@@ -426,15 +353,15 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             # Add EOS to labels
             labels_with_eos = torch.cat([
                 labels,
-                torch.full((B, 1), self.config.pad_token_id, 
+                torch.full((B, 1), self.config.pad_token_id,
                           device=labels.device, dtype=labels.dtype)
             ], dim=1)
-            
+
             # Place EOS at end of each sequence
             label_lens = (labels != self.config.pad_token_id).sum(dim=1)
             for i in range(B):
                 labels_with_eos[i, label_lens[i]] = self.config.eos_token_id
-            
+
             # Flatten targets (only where loss_mask is True)
             targets_list = []
             for b in range(B):
@@ -442,27 +369,27 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
                 n_loss_tokens = loss_mask[b].sum().item()
                 # Take that many tokens from labels_with_eos
                 targets_list.append(labels_with_eos[b, :n_loss_tokens])
-            
+
             targets = torch.cat(targets_list, dim=0)
-            
+
             # Extract relevant logits
             relevant_logits = logits[loss_mask]
-            
+
             # Compute loss
             loss_fct = nn.CrossEntropyLoss(
                 ignore_index=self.config.pad_token_id,
                 reduction='sum'
             )
             loss = loss_fct(relevant_logits, targets)
-            
+
             # Normalize (fairseq2 style)
             n_tokens = (labels != self.config.pad_token_id).sum() + B
             loss = loss / n_tokens * B
-        
+
         if not return_dict:
             output = (logits,) + outputs[1:]
             return ((loss,) + output) if loss is not None else output
-        
+
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -486,98 +413,78 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
     ) -> torch.Tensor:
         """
         Generate transcription - FIXED to match fairseq2.
-        
-        Key fixes:
-        1. Create syntax THEN embed (fairseq2 order)
-        2. Don't add SDPA padding for generation
-        3. BOS is part of context, not first generated token
         """
         B = audio_values.shape[0]
         device = audio_values.device
         dtype = next(self.parameters()).dtype
-        
-        # Compute audio sequence lengths
-        audio_seq_lens = (audio_attention_mask.sum(dim=1).tolist() 
-                         if audio_attention_mask is not None 
-                         else [audio_values.shape[1]] * B)
-        
-        # Create un-embedded inputs
-        inputs = [ModalityInput(
-            modality=Modality.AUDIO,
-            seqs=audio_values,
-            seq_lens=audio_seq_lens,
-            loss=False,
-            embedded=False
-        )]
-        
+
+        # Embed audio
+        embedded_audio, embedded_audio_seq_lens = self.embed_audio(audio_values, attention_mask=audio_attention_mask)
+
+        # Prepare text and language inputs
+        text_loss_flags = [False] * B  # Initialize with default value
+
         # Add language embeddings if configured
         if self.lang_embeddings is not None:
             # LID marker
-            lid_marker = torch.full((B, 1), self.special_tokens.lid_marker, 
+            lid_marker = torch.full((B, 1), self.config.lid_marker_id,
                                    dtype=torch.long, device=device)
-            inputs.append(ModalityInput(
-                modality=Modality.TEXT,
-                seqs=lid_marker,
-                seq_lens=[1] * B,
-                loss=False,
-                embedded=False
-            ))
-            
+            lid_marker_embedded = self.embed_text(lid_marker).to(dtype)
+
             # Language ID
             if lang_ids is not None:
                 lang_id_tensor = lang_ids.unsqueeze(1) if lang_ids.dim() == 1 else lang_ids
             else:
                 lang_id_tensor = torch.zeros(B, 1, dtype=torch.long, device=device)
-            
-            inputs.append(ModalityInput(
-                modality=Modality.LANG,
-                seqs=lang_id_tensor,
-                seq_lens=[1] * B,
-                loss=False,
-                embedded=False
-            ))
 
-        # Adding BOS, target seqs and EOS
-        bos = torch.full((B, 1), self.config.bos_token_id, dtype=torch.long, device=device)
+            embedded_lang = self.embed_lang(lang_id_tensor).to(dtype)
+
+            # Combine with language embedding if present
+            # Concatenate LID marker, language ID, and BOS
+            bos = torch.full((B, 1), self.config.bos_token_id, dtype=torch.long, device=device)
+            bos_embedded = self.embed_text(bos).to(dtype)
+            combined_text = torch.cat([lid_marker_embedded, embedded_lang, bos_embedded], dim=1)
+        else:
+            # Just BOS token
+            bos = torch.full((B, 1), self.config.bos_token_id, dtype=torch.long, device=device)
+            combined_text = self.embed_text(bos).to(dtype)
+
+        # Add empty token for generation (this is where the model will start predicting)
+        empty_token = torch.zeros(B, 1, dtype=torch.long, device=device)
+        empty_token_embedded = self.embed_text(empty_token).to(dtype)
+        combined_text = torch.cat([combined_text, empty_token_embedded], dim=1)
+
+        # Update loss flags - The empty token contributes to loss (will be predicted)
+        text_loss_flags = [True] * B  # The empty token contributes to loss (will be predicted)
+
+        # EOS token
         eos = torch.full((B, 1), self.config.eos_token_id, dtype=torch.long, device=device)
+        eos_embedded = self.embed_text(eos).to(dtype)
+        combined_text = torch.cat([combined_text, eos_embedded], dim=1)
 
-        inputs.append(ModalityInput(
-            modality=Modality.TEXT,
-            seqs=bos,
-            seq_lens=[1] * B,
-            loss=False,
-            embedded=False
-        ))
-
-        inputs.append(ModalityInput(
-                modality=Modality.TEXT,
-                seqs=torch.zeros(1, 1, dtype=torch.long, device=device),
-                seq_lens=[1] * B,
-                loss=True,
-        ))
-
-        inputs.append(ModalityInput(
-            modality=Modality.TEXT,
-            seqs=eos,
-            seq_lens=[1] * B,
-            loss=False,
-            embedded=False
-        ))
-
-        
-        # Embed all inputs
-        inputs = self.embed_inputs(inputs, dtype)
         # Concatenate (no padding for generation)
-        inputs_embeds, _, total_lens = self._concat_inputs(inputs, device, dtype)
-        
+        inputs_embeds, _ = self._concat_inputs(
+            embedded_audio_seqs=embedded_audio,
+            audio_loss_flags=[False] * B,  # Audio segments don't contribute to loss
+            embedded_text_seqs=combined_text,
+            text_loss_flags=text_loss_flags,
+            embedded_lang_seqs=None,  # Already handled above
+            lang_loss_flags=None,
+            device=device,
+            dtype=dtype,
+            add_padding=False  # No padding for generation
+        )
+
+        # Calculate total lens from the concatenated inputs
+        total_lens = [inputs_embeds.shape[1]] * B
+
         # Trim to actual lengths
         max_context_len = max(total_lens) - 1
         inputs_embeds = inputs_embeds[:, :max_context_len, :]
-        
-        # Create attention mask
-        attention_mask = torch.zeros(B, max_context_len, dtype=torch.long, device=device)
-        for i, length in enumerate(total_lens):
-            attention_mask[i, :length] = 1
+
+        # Create attention mask using torch.arange for efficiency
+        position_ids = torch.arange(max_context_len, device=device).unsqueeze(0).expand(B, -1)
+        attention_mask = (position_ids < torch.tensor(total_lens, device=device).unsqueeze(1)).long()
 
         # Generate using HuggingFace's generate
         outputs = self.llama.generate(
@@ -593,5 +500,5 @@ class Wav2Vec2LlamaModel(PreTrainedModel):
             top_p=top_p,
             **generate_kwargs
         )
-        
+
         return outputs
